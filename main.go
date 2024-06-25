@@ -19,20 +19,29 @@ import (
 	"github.com/blocto/solana-go-sdk/types"
 )
 
-const solAmount = uint64(300000) // 0.0003 in lamports
-
 func main() {
-	// Load private keys from pk.txt
-	privateKeys, err := readPrivateKeys("pk.txt")
-	if err != nil {
-		log.Fatalf("Failed to read private keys: %v", err)
-	}
+	const minSolAmount = 0.001
 
 	rpcSonic := "https://devnet.sonic.game"
 	rpcClient := client.NewClient(rpcSonic)
 
-	fmt.Print("How many addresses do you want to generate: ")
+	fmt.Print("How many amount sol do you want to transfer? (minimum is 0.001 SOL) : ")
 	reader := bufio.NewReader(os.Stdin)
+	amountInput, _ := reader.ReadString('\n')
+	amountInput = strings.TrimSpace(amountInput)
+	amount, err := strconv.ParseFloat(amountInput, 64)
+	if err != nil {
+		log.Fatalf("Invalid transfer amount: %v", err)
+	}
+
+	if amount < minSolAmount {
+		fmt.Printf("Transfer amount (%.9f SOL) is below minimum (%.9f SOL). Setting transfer amount to minimum.\n", amount, minSolAmount)
+		amount = minSolAmount
+	}
+
+	solAmount := uint64(amount * 1_000_000_000) // convert to lamports (1 SOL = 1,000,000,000 lamports)
+
+	fmt.Print("How many addresses do you want to generate: ")
 	addressCountInput, _ := reader.ReadString('\n')
 	addressCountInput = strings.TrimSpace(addressCountInput)
 	addressCount, err := strconv.Atoi(addressCountInput)
@@ -41,7 +50,7 @@ func main() {
 	}
 
 	// Get delay
-	fmt.Print("Input delay (dalam detik): ")
+	fmt.Print("Input delay (in seconds): ")
 	delayInput, _ := reader.ReadString('\n')
 	delayInput = strings.TrimSpace(delayInput)
 	delay, err := strconv.Atoi(delayInput)
@@ -53,6 +62,11 @@ func main() {
 	fmt.Print("Enter Authorization key (or press enter to skip): ")
 	authKey, _ := reader.ReadString('\n')
 	authKey = strings.TrimSpace(authKey)
+
+	privateKeys, err := readPrivateKeys("pk.txt")
+	if err != nil {
+		log.Fatalf("Failed to read private keys: %v", err)
+	}
 
 	for _, privateKeyBase58 := range privateKeys {
 		accountFrom, err := types.AccountFromBase58(privateKeyBase58)
@@ -117,7 +131,7 @@ func main() {
 			if err != nil {
 				log.Printf("Failed to send transaction to %s: %v", address.ToBase58(), err)
 			} else {
-				fmt.Printf("Success sending to %s with transaction hash %s\n", address.ToBase58(), txHash)
+				fmt.Printf("Success sending %.9f SOL to %s, transaction hash: https://explorer.sonic.game/tx/%s\n", float64(solAmount)/1_000_000_000, address.ToBase58(), txHash)
 			}
 
 			// If user input a jwt token then fetch tx total

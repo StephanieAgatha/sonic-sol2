@@ -23,7 +23,6 @@ import (
 )
 
 const (
-	maxRetries = 5
 	delayRetry = 2 * time.Second
 )
 
@@ -62,7 +61,7 @@ func main() {
 	initLogger()
 	privateKeys, err := readPrivateKeys("pk.txt")
 	if err != nil {
-		log.Err(err).Msg("Failed to read private key file")
+		log.Error().Err(err).Msg("Failed to read private key file")
 		return
 	}
 
@@ -77,7 +76,8 @@ func main() {
 	amountInput = strings.TrimSpace(amountInput)
 	amount, err := strconv.ParseFloat(amountInput, 64)
 	if err != nil {
-		log.Err(err).Msg("Invalid transfer amount")
+		log.Error().Err(err).Msg("Invalid transfer amount")
+		return
 	}
 
 	if amount < minSolAmount {
@@ -92,7 +92,8 @@ func main() {
 	addressCountInput = strings.TrimSpace(addressCountInput)
 	addressCount, err := strconv.Atoi(addressCountInput)
 	if err != nil {
-		log.Err(err).Msg("Invaid number of address")
+		log.Error().Err(err).Msg("Invalid number of addresses")
+		return
 	}
 
 	// Get delay
@@ -101,7 +102,8 @@ func main() {
 	delayInput = strings.TrimSpace(delayInput)
 	delay, err := strconv.Atoi(delayInput)
 	if err != nil {
-		log.Err(err).Msg("Invalid delay input")
+		log.Error().Err(err).Msg("Invalid delay input")
+		return
 	}
 
 	// Get Authorization value from user
@@ -109,38 +111,47 @@ func main() {
 	authKey, _ := reader.ReadString('\n')
 	authKey = strings.TrimSpace(authKey)
 
-	//initialize wg for impl groutine
 	var wg sync.WaitGroup
 	startTime := time.Now()
 
 	for _, privateKeyBase58 := range privateKeys {
 		accountFrom, err := types.AccountFromBase58(privateKeyBase58)
 		if err != nil {
-			log.Err(err).Msg("Failed to generate keypair")
+			log.Error().Err(err).Msg("Failed to generate keypair")
+			continue
 		}
 
 		if privateKeyBase58 == "" {
-			log.Err(err).Msg("No private keys found")
+			log.Error().Msg("No private keys found")
+			continue
 		}
 
 		// Check balance
 		balanceResult, err := rpcClient.GetBalance(context.TODO(), accountFrom.PublicKey.ToBase58())
 		if err != nil {
-			log.Err(err).Msg("Failed to get balance")
+			log.Error().Err(err).Msg("Failed to get balance")
+			continue
 		}
 
 		balance := balanceResult
 		if balance == 0 {
-			log.Err(err).Msg("No balance available")
-			return
+			log.Error().Msg("No balance available")
+			continue
 		}
 
 		// Print balance
-		log.Info().Str("wallet", accountFrom.PublicKey.ToBase58()).Float64("balance", float64(balance)/1_000_000_000)
+		log.Info().
+			Str("wallet", accountFrom.PublicKey.ToBase58()).
+			Float64("balance", float64(balance)/1_000_000_000).
+			Msg("Wallet balance")
 
 		requiredBalance := solAmount * uint64(addressCount)
 		if balance < requiredBalance {
-			log.Err(err).Uint64("balance now", balance).Uint64("required", requiredBalance).Msg("Insufficient balance")
+			log.Error().
+				Uint64("balance now", balance).
+				Uint64("required", requiredBalance).
+				Msg("Insufficient balance")
+			continue
 		}
 
 		var addresses []common.PublicKey
@@ -154,55 +165,56 @@ func main() {
 			wg.Add(1)
 			go func(address common.PublicKey) {
 				defer wg.Done()
-				var blockhashResponse rpc.GetLatestBlockhashValue
-				var err error
-				for i := 0; i < maxRetries; i++ {
-					blockhashResponse, err = rpcClient.GetLatestBlockhash(context.TODO())
-					if err == nil {
-						break
-					}
-					log.Error().Str("error", "failed to get blockhash").Msgf("retrying in 3 seconds... attempt %d/%d", i+1, maxRetries)
-					time.Sleep(delayRetry)
-				}
-				if err != nil {
-					log.Err(err).Int("maxretries", maxRetries).Msg("Failed to get latest blockhash")
-					log.Info().Msg("Skipping transaction ...")
-					return // Skip to the nextt one
-				}
-
-				instruction := system.Transfer(system.TransferParam{
-					From:   accountFrom.PublicKey,
-					To:     address,
-					Amount: solAmount,
-				})
-
-				message := types.NewMessage(types.NewMessageParam{
-					FeePayer:        accountFrom.PublicKey,
-					RecentBlockhash: blockhashResponse.Blockhash,
-					Instructions:    []types.Instruction{instruction},
-				})
-
-				tx, err := types.NewTransaction(types.NewTransactionParam{
-					Message: message,
-					Signers: []types.Account{accountFrom},
-				})
-				if err != nil {
-					log.Err(err).Msg("Failed to craete transaction")
-				}
-
-				// Send transaction with retries
-				for i := 0; i < maxRetries; i++ {
-					txHash, err := rpcClient.SendTransaction(context.TODO(), tx)
-					if err != nil {
-						log.Error().Msgf("Failed to send transaction to %s, retrying in 3 seconds Attempt %d/%d", address.ToBase58(), i+1, maxRetries)
+				for {
+					var blockhashResponse rpc.GetLatestBlockhashValue
+					var err error
+					for {
+						blockhashResponse, err = rpcClient.GetLatestBlockhash(context.TODO())
+						if err == nil {
+							break
+						}
+						log.Error().Msg("Failed to get blockhash, retrying...")
 						time.Sleep(delayRetry)
-					} else {
-						log.Info().Msgf("Success sending %.9f sol to %s, tx hash : https://explorer.sonic.game/tx/%s\n", float64(solAmount)/1_000_000_000, address.ToBase58(), txHash)
-						break
 					}
-					if i == maxRetries-1 {
-						log.Err(err).Msgf("Failed to send transaction to %s after %d attempts, skipping", address.ToBase58(), maxRetries)
+
+					instruction := system.Transfer(system.TransferParam{
+						From:   accountFrom.PublicKey,
+						To:     address,
+						Amount: solAmount,
+					})
+
+					message := types.NewMessage(types.NewMessageParam{
+						FeePayer:        accountFrom.PublicKey,
+						RecentBlockhash: blockhashResponse.Blockhash,
+						Instructions:    []types.Instruction{instruction},
+					})
+
+					tx, err := types.NewTransaction(types.NewTransactionParam{
+						Message: message,
+						Signers: []types.Account{accountFrom},
+					})
+					if err != nil {
+						log.Error().Msg("Failed to create transaction")
+						continue
 					}
+
+					// Send transaction with retries
+					for {
+						txHash, err := rpcClient.SendTransaction(context.TODO(), tx)
+						if err == nil {
+							log.Info().
+								Str("to address", address.ToBase58()).
+								Str("tx hash", txHash).
+								Float64("amount", float64(solAmount)/1_000_000_000).
+								Msg("Successfully sent SOL")
+							break
+						}
+						log.Error().
+							Str("to address", address.ToBase58()).
+							Msg("Failed to send transaction, retrying...")
+						time.Sleep(delayRetry)
+					}
+					break
 				}
 
 				// If user input a jwt token then fetch tx total
@@ -218,11 +230,12 @@ func main() {
 			}(address)
 		}
 	}
+
 	wg.Wait()
 
 	endTime := time.Now()
 	duration := endTime.Sub(startTime)
-	log.Info().Msgf("Success sending %d address, and it took %.2f seconds\n", addressCount, duration.Seconds())
+	log.Info().Msgf("Successfully sent to %d addresses, and it took %.2f seconds\n", addressCount, duration.Seconds())
 }
 
 func getTxMilestone(authKey string) {

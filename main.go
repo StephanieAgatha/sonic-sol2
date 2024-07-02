@@ -216,15 +216,6 @@ func main() {
 					}
 					break
 				}
-
-				// If user input a jwt token then fetch tx total
-				if authKey != "" {
-					fmt.Println("==================")
-					fmt.Println("Fetch transaction from sonic server ...")
-					getTxMilestone(authKey)
-					fmt.Println("==================")
-				}
-
 				// Delay
 				time.Sleep(time.Duration(delay) * time.Second)
 			}(address)
@@ -232,6 +223,14 @@ func main() {
 	}
 
 	wg.Wait()
+
+	// If user input a jwt token then fetch tx total
+	if authKey != "" {
+		fmt.Println("==================")
+		fmt.Println("Fetch transaction from sonic server ...")
+		getTxMilestone(authKey)
+		fmt.Println("==================")
+	}
 
 	endTime := time.Now()
 	duration := endTime.Sub(startTime)

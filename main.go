@@ -230,6 +230,14 @@ func main() {
 		fmt.Println("Fetch transaction from sonic server ...")
 		getTxMilestone(authKey)
 		fmt.Println("==================")
+
+		// Claim rewards for stages 1, 2, and 3
+		for stage := 1; stage <= 3; stage++ {
+			fmt.Printf("Claiming reward stage %d....\n", stage)
+			claimReward(authKey, stage)
+			time.Sleep(3 * time.Second)
+			fmt.Println("Done")
+		}
 	}
 
 	endTime := time.Now()
@@ -276,5 +284,56 @@ func getTxMilestone(authKey string) {
 		}
 	} else {
 		fmt.Println("failed to fetch data", err)
+	}
+}
+
+func claimReward(authKey string, stage int) {
+	url := "https://odyssey-api.sonic.game/user/transactions/rewards/claim"
+	method := "POST"
+
+	payload := map[string]int{"stage": stage}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		fmt.Println("Failed to marshal payload:", err)
+		return
+	}
+
+	client := &http.Client{}
+	req, err := http.NewRequest(method, url, strings.NewReader(string(payloadBytes)))
+	if err != nil {
+		fmt.Println("Failed to create request:", err)
+		return
+	}
+	req.Header.Add("Authorization", authKey)
+	req.Header.Add("Content-Type", "application/json")
+
+	res, err := client.Do(req)
+	if err != nil {
+		fmt.Println("Failed to send request:", err)
+		return
+	}
+	defer res.Body.Close()
+
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		fmt.Println("Failed to read response body:", err)
+		return
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err != nil {
+		fmt.Println("Failed to unmarshal response:", err)
+		return
+	}
+
+	if code, ok := result["code"].(float64); ok && code == 100015 {
+		fmt.Printf("Already claimed stage %d\n", stage)
+		return
+	}
+
+	if status, ok := result["status"].(string); ok && status == "success" {
+		fmt.Printf("Claimed reward stage %d\n", stage)
+	} else {
+		fmt.Printf("Failed to claim reward stage %d\n", stage)
 	}
 }

@@ -1,2 +1,2 @@
-pk1
-pk2
+wallet1
+wallet2

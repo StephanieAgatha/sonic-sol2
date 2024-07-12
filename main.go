@@ -5,7 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/blocto/solana-go-sdk/client"
+	"github.com/blocto/solana-go-sdk/common"
+	"github.com/blocto/solana-go-sdk/program/system"
 	"github.com/blocto/solana-go-sdk/rpc"
+	"github.com/blocto/solana-go-sdk/types"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -14,10 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/blocto/solana-go-sdk/client"
-	"github.com/blocto/solana-go-sdk/common"
-	"github.com/blocto/solana-go-sdk/program/system"
-	"github.com/blocto/solana-go-sdk/types"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -57,192 +57,30 @@ func readPrivateKeys(filename string) ([]string, error) {
 	return privateKeys, nil
 }
 
-func main() {
-	initLogger()
-	privateKeys, err := readPrivateKeys("pk.txt")
+func readHeaders(filename string) ([]string, error) {
+	file, err := os.Open(filename)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to read private key file")
-		return
+		return nil, err
 	}
+	defer file.Close()
 
-	const minSolAmount = 0.001
-
-	rpcSonic := "https://devnet.sonic.game"
-	rpcClient := client.NewClient(rpcSonic)
-
-	fmt.Print("How many amount sol do you want to transfer? (minimum is 0.001 SOL) : ")
-	reader := bufio.NewReader(os.Stdin)
-	amountInput, _ := reader.ReadString('\n')
-	amountInput = strings.TrimSpace(amountInput)
-	amount, err := strconv.ParseFloat(amountInput, 64)
-	if err != nil {
-		log.Error().Err(err).Msg("Invalid transfer amount")
-		return
-	}
-
-	if amount < minSolAmount {
-		fmt.Printf("Transfer amount (%.9f SOL) is below minimum (%.9f SOL). Setting transfer amount to minimum.\n", amount, minSolAmount)
-		amount = minSolAmount
-	}
-
-	solAmount := uint64(amount * 1_000_000_000) // convert to lamports (1 SOL = 1,000,000,000 lamports)
-
-	fmt.Print("How many addresses do you want to generate: ")
-	addressCountInput, _ := reader.ReadString('\n')
-	addressCountInput = strings.TrimSpace(addressCountInput)
-	addressCount, err := strconv.Atoi(addressCountInput)
-	if err != nil {
-		log.Error().Err(err).Msg("Invalid number of addresses")
-		return
-	}
-
-	// Get delay
-	fmt.Print("Input delay (in seconds): ")
-	delayInput, _ := reader.ReadString('\n')
-	delayInput = strings.TrimSpace(delayInput)
-	delay, err := strconv.Atoi(delayInput)
-	if err != nil {
-		log.Error().Err(err).Msg("Invalid delay input")
-		return
-	}
-
-	// Get Authorization value from user
-	fmt.Print("Enter Authorization key (or press enter to skip): ")
-	authKey, _ := reader.ReadString('\n')
-	authKey = strings.TrimSpace(authKey)
-
-	var wg sync.WaitGroup
-	startTime := time.Now()
-
-	for _, privateKeyBase58 := range privateKeys {
-		accountFrom, err := types.AccountFromBase58(privateKeyBase58)
-		if err != nil {
-			log.Error().Err(err).Msg("Failed to generate keypair")
-			continue
-		}
-
-		if privateKeyBase58 == "" {
-			log.Error().Msg("No private keys found")
-			continue
-		}
-
-		// Check balance
-		balanceResult, err := rpcClient.GetBalance(context.TODO(), accountFrom.PublicKey.ToBase58())
-		if err != nil {
-			log.Error().Err(err).Msg("Failed to get balance")
-			continue
-		}
-
-		balance := balanceResult
-		if balance == 0 {
-			log.Error().Msg("No balance available")
-			continue
-		}
-
-		// Print balance
-		log.Info().
-			Str("wallet", accountFrom.PublicKey.ToBase58()).
-			Float64("balance", float64(balance)/1_000_000_000).
-			Msg("Wallet balance")
-
-		requiredBalance := solAmount * uint64(addressCount)
-		if balance < requiredBalance {
-			log.Error().
-				Uint64("balance now", balance).
-				Uint64("required", requiredBalance).
-				Msg("Insufficient balance")
-			continue
-		}
-
-		var addresses []common.PublicKey
-		for i := 0; i < addressCount; i++ {
-			newKeypair := types.NewAccount()
-			addresses = append(addresses, newKeypair.PublicKey)
-			fmt.Printf("Generated address %d: %s\n", i+1, newKeypair.PublicKey.ToBase58())
-		}
-
-		for _, address := range addresses {
-			wg.Add(1)
-			go func(address common.PublicKey) {
-				defer wg.Done()
-				for {
-					var blockhashResponse rpc.GetLatestBlockhashValue
-					var err error
-					for {
-						blockhashResponse, err = rpcClient.GetLatestBlockhash(context.TODO())
-						if err == nil {
-							break
-						}
-						log.Error().Msg("Failed to get blockhash, retrying...")
-						time.Sleep(delayRetry)
-					}
-
-					instruction := system.Transfer(system.TransferParam{
-						From:   accountFrom.PublicKey,
-						To:     address,
-						Amount: solAmount,
-					})
-
-					message := types.NewMessage(types.NewMessageParam{
-						FeePayer:        accountFrom.PublicKey,
-						RecentBlockhash: blockhashResponse.Blockhash,
-						Instructions:    []types.Instruction{instruction},
-					})
-
-					tx, err := types.NewTransaction(types.NewTransactionParam{
-						Message: message,
-						Signers: []types.Account{accountFrom},
-					})
-					if err != nil {
-						log.Error().Msg("Failed to create transaction")
-						continue
-					}
-
-					// Send transaction with retries
-					for {
-						txHash, err := rpcClient.SendTransaction(context.TODO(), tx)
-						if err == nil {
-							log.Info().
-								Str("to address", address.ToBase58()).
-								Str("tx hash", txHash).
-								Float64("amount", float64(solAmount)/1_000_000_000).
-								Msg("Successfully sent SOL")
-							break
-						}
-						log.Error().
-							Str("to address", address.ToBase58()).
-							Msg("Failed to send transaction, retrying...")
-						time.Sleep(delayRetry)
-					}
-					break
-				}
-				// Delay
-				time.Sleep(time.Duration(delay) * time.Second)
-			}(address)
+	var headers []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		header := strings.TrimSpace(scanner.Text())
+		if header != "" {
+			headers = append(headers, header)
 		}
 	}
-
-	wg.Wait()
-
-	// If user input a jwt token then fetch tx total
-	if authKey != "" {
-		fmt.Println("==================")
-		fmt.Println("Fetch transaction from sonic server ...")
-		getTxMilestone(authKey)
-		fmt.Println("==================")
-
-		// Claim rewards for stages 1, 2, and 3
-		for stage := 1; stage <= 3; stage++ {
-			fmt.Printf("Claiming reward stage %d....\n", stage)
-			claimReward(authKey, stage)
-			time.Sleep(3 * time.Second)
-			fmt.Println("Done")
-		}
+	if err := scanner.Err(); err != nil {
+		return nil, err
 	}
 
-	endTime := time.Now()
-	duration := endTime.Sub(startTime)
-	log.Info().Msgf("Successfully sent to %d addresses, and it took %.2f seconds\n", addressCount, duration.Seconds())
+	if len(headers) == 0 {
+		return nil, fmt.Errorf("No headers found in header.txt file")
+	}
+
+	return headers, nil
 }
 
 func getTxMilestone(authKey string) {
@@ -336,4 +174,206 @@ func claimReward(authKey string, stage int) {
 	} else {
 		fmt.Printf("Failed to claim reward stage %d\n", stage)
 	}
+}
+
+func main() {
+	initLogger()
+	privateKeys, err := readPrivateKeys("pk.txt")
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to read private key file")
+		return
+	}
+
+	var headers []string
+	useHeaders := false
+
+	fmt.Print("Do you want to use Authorization key for claiming rewards? (y/n): ")
+	reader := bufio.NewReader(os.Stdin)
+	useAuthInput, _ := reader.ReadString('\n')
+	useAuthInput = strings.TrimSpace(strings.ToLower(useAuthInput))
+
+	if useAuthInput == "y" {
+		headers, err = readHeaders("header.txt")
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to read header file")
+			return
+		}
+
+		if len(privateKeys) != len(headers) {
+			log.Error().Msg("Number of private keys and headers don't match")
+			return
+		}
+		useHeaders = true
+	}
+
+	const minSolAmount = 0.001
+
+	rpcSonic := "https://devnet.sonic.game"
+	rpcClient := client.NewClient(rpcSonic)
+
+	fmt.Print("How many amount sol do you want to transfer? (minimum is 0.001 SOL) : ")
+	amountInput, _ := reader.ReadString('\n')
+	amountInput = strings.TrimSpace(amountInput)
+	amount, err := strconv.ParseFloat(amountInput, 64)
+	if err != nil {
+		log.Error().Err(err).Msg("Invalid transfer amount")
+		return
+	}
+
+	if amount < minSolAmount {
+		fmt.Printf("Transfer amount (%.9f SOL) is below minimum (%.9f SOL). Setting transfer amount to minimum.\n", amount, minSolAmount)
+		amount = minSolAmount
+	}
+
+	solAmount := uint64(amount * 1_000_000_000) // convert to lamports (1 SOL = 1,000,000,000 lamports)
+
+	fmt.Print("How many addresses do you want to generate: ")
+	addressCountInput, _ := reader.ReadString('\n')
+	addressCountInput = strings.TrimSpace(addressCountInput)
+	addressCount, err := strconv.Atoi(addressCountInput)
+	if err != nil {
+		log.Error().Err(err).Msg("Invalid number of addresses")
+		return
+	}
+
+	fmt.Print("Input delay (in seconds): ")
+	delayInput, _ := reader.ReadString('\n')
+	delayInput = strings.TrimSpace(delayInput)
+	delay, err := strconv.Atoi(delayInput)
+	if err != nil {
+		log.Error().Err(err).Msg("Invalid delay input")
+		return
+	}
+
+	var wg sync.WaitGroup
+	startTime := time.Now()
+
+	for i, privateKeyBase58 := range privateKeys {
+		accountFrom, err := types.AccountFromBase58(privateKeyBase58)
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to generate keypair")
+			continue
+		}
+
+		if privateKeyBase58 == "" {
+			log.Error().Msg("No private keys found")
+			continue
+		}
+
+		if useHeaders {
+			fmt.Printf("Using header for wallet: %s\n", accountFrom.PublicKey.ToBase58())
+		}
+
+		balanceResult, err := rpcClient.GetBalance(context.TODO(), accountFrom.PublicKey.ToBase58())
+		if err != nil {
+			log.Error().Err(err).Msg("Failed to get balance")
+			continue
+		}
+
+		balance := balanceResult
+		if balance == 0 {
+			log.Error().Msg("No balance available")
+			continue
+		}
+
+		log.Info().
+			Str("wallet", accountFrom.PublicKey.ToBase58()).
+			Float64("balance", float64(balance)/1_000_000_000).
+			Msg("Wallet balance")
+
+		requiredBalance := solAmount * uint64(addressCount)
+		if balance < requiredBalance {
+			log.Error().
+				Uint64("balance now", balance).
+				Uint64("required", requiredBalance).
+				Msg("Insufficient balance")
+			continue
+		}
+
+		var addresses []common.PublicKey
+		for i := 0; i < addressCount; i++ {
+			newKeypair := types.NewAccount()
+			addresses = append(addresses, newKeypair.PublicKey)
+			fmt.Printf("Generated address %d: %s\n", i+1, newKeypair.PublicKey.ToBase58())
+		}
+
+		for _, address := range addresses {
+			wg.Add(1)
+			go func(address common.PublicKey) {
+				defer wg.Done()
+				for {
+					var blockhashResponse rpc.GetLatestBlockhashValue
+					var err error
+					for {
+						blockhashResponse, err = rpcClient.GetLatestBlockhash(context.TODO())
+						if err == nil {
+							break
+						}
+						log.Error().Msg("Failed to get blockhash, retrying...")
+						time.Sleep(delayRetry)
+					}
+
+					instruction := system.Transfer(system.TransferParam{
+						From:   accountFrom.PublicKey,
+						To:     address,
+						Amount: solAmount,
+					})
+
+					message := types.NewMessage(types.NewMessageParam{
+						FeePayer:        accountFrom.PublicKey,
+						RecentBlockhash: blockhashResponse.Blockhash,
+						Instructions:    []types.Instruction{instruction},
+					})
+
+					tx, err := types.NewTransaction(types.NewTransactionParam{
+						Message: message,
+						Signers: []types.Account{accountFrom},
+					})
+					if err != nil {
+						log.Error().Msg("Failed to create transaction")
+						continue
+					}
+
+					for {
+						txHash, err := rpcClient.SendTransaction(context.TODO(), tx)
+						if err == nil {
+							log.Info().
+								Str("to address", address.ToBase58()).
+								Str("tx hash", txHash).
+								Float64("amount", float64(solAmount)/1_000_000_000).
+								Msg("Successfully sent SOL")
+							break
+						}
+						log.Error().
+							Str("to address", address.ToBase58()).
+							Msg("Failed to send transaction, retrying...")
+						time.Sleep(delayRetry)
+					}
+					break
+				}
+				time.Sleep(time.Duration(delay) * time.Second)
+			}(address)
+		}
+
+		if useHeaders {
+			// After transactions for this wallet, claim rewards
+			fmt.Println("==================")
+			fmt.Printf("Fetching transactions for wallet: %s\n", accountFrom.PublicKey.ToBase58())
+			getTxMilestone(headers[i])
+			fmt.Println("==================")
+
+			for stage := 1; stage <= 3; stage++ {
+				fmt.Printf("Claiming reward stage %d for wallet: %s\n", stage, accountFrom.PublicKey.ToBase58())
+				claimReward(headers[i], stage)
+				time.Sleep(3 * time.Second)
+				fmt.Println("Done")
+			}
+		}
+	}
+
+	wg.Wait()
+
+	endTime := time.Now()
+	duration := endTime.Sub(startTime)
+	log.Info().Msgf("Successfully sent to %d addresses, and it took %.2f seconds\n", addressCount, duration.Seconds())
 }

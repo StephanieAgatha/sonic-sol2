@@ -246,7 +246,7 @@ func main() {
 }
 
 func getTxMilestone(authKey string) {
-	url := "https://odyssey-api.sonic.game/user/transactions/state/daily"
+	url := "https://odyssey-api-beta.sonic.game/user/transactions/state/daily"
 	method := "GET"
 
 	client := &http.Client{}
@@ -288,7 +288,7 @@ func getTxMilestone(authKey string) {
 }
 
 func claimReward(authKey string, stage int) {
-	url := "https://odyssey-api.sonic.game/user/transactions/rewards/claim"
+	url := "https://odyssey-api-beta.sonic.game/user/transactions/rewards/claim"
 	method := "POST"
 
 	payload := map[string]int{"stage": stage}

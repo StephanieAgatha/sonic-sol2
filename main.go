@@ -11,6 +11,7 @@ import (
 	"github.com/blocto/solana-go-sdk/rpc"
 	"github.com/blocto/solana-go-sdk/types"
 	"io/ioutil"
+	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
@@ -23,7 +24,9 @@ import (
 )
 
 const (
-	delayRetry = 2 * time.Second
+	delayRetry   = 2 * time.Second
+	minSolAmount = 0.001
+	maxSolAmount = 0.01 // You can adjust this value as needed
 )
 
 func initLogger() {
@@ -94,6 +97,7 @@ func getTxMilestone(authKey string) {
 		return
 	}
 	req.Header.Add("Authorization", authKey)
+	req.Header.Add("User-Agent", "Mozilla/5.0 Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Safari/605.1.15")
 
 	res, err := client.Do(req)
 	if err != nil {
@@ -144,6 +148,8 @@ func claimReward(authKey string, stage int) {
 	}
 	req.Header.Add("Authorization", authKey)
 	req.Header.Add("Content-Type", "application/json")
+	req.Header.Add("Accept", "application/json")
+	req.Header.Add("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36")
 
 	res, err := client.Do(req)
 	if err != nil {
@@ -155,6 +161,15 @@ func claimReward(authKey string, stage int) {
 	body, err := ioutil.ReadAll(res.Body)
 	if err != nil {
 		fmt.Println("Failed to read response body:", err)
+		return
+	}
+
+	// i will print raw response for debugging first
+	fmt.Println("Raw response:", string(body))
+
+	// Check status code
+	if res.StatusCode != http.StatusOK {
+		fmt.Printf("Unexpected status code: %d\n", res.StatusCode)
 		return
 	}
 
@@ -178,6 +193,8 @@ func claimReward(authKey string, stage int) {
 
 func main() {
 	initLogger()
+	rand.Seed(time.Now().UnixNano()) // Initialize random number generator
+
 	privateKeys, err := readPrivateKeys("pk.txt")
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to read private key file")
@@ -206,26 +223,8 @@ func main() {
 		useHeaders = true
 	}
 
-	const minSolAmount = 0.001
-
 	rpcSonic := "https://devnet.sonic.game"
 	rpcClient := client.NewClient(rpcSonic)
-
-	fmt.Print("How many amount sol do you want to transfer? (minimum is 0.001 SOL) : ")
-	amountInput, _ := reader.ReadString('\n')
-	amountInput = strings.TrimSpace(amountInput)
-	amount, err := strconv.ParseFloat(amountInput, 64)
-	if err != nil {
-		log.Error().Err(err).Msg("Invalid transfer amount")
-		return
-	}
-
-	if amount < minSolAmount {
-		fmt.Printf("Transfer amount (%.9f SOL) is below minimum (%.9f SOL). Setting transfer amount to minimum.\n", amount, minSolAmount)
-		amount = minSolAmount
-	}
-
-	solAmount := uint64(amount * 1_000_000_000) // convert to lamports (1 SOL = 1,000,000,000 lamports)
 
 	fmt.Print("How many addresses do you want to generate: ")
 	addressCountInput, _ := reader.ReadString('\n')
@@ -281,15 +280,6 @@ func main() {
 			Float64("balance", float64(balance)/1_000_000_000).
 			Msg("Wallet balance")
 
-		requiredBalance := solAmount * uint64(addressCount)
-		if balance < requiredBalance {
-			log.Error().
-				Uint64("balance now", balance).
-				Uint64("required", requiredBalance).
-				Msg("Insufficient balance")
-			continue
-		}
-
 		var addresses []common.PublicKey
 		for i := 0; i < addressCount; i++ {
 			newKeypair := types.NewAccount()
@@ -312,6 +302,10 @@ func main() {
 						log.Error().Msg("Failed to get blockhash, retrying...")
 						time.Sleep(delayRetry)
 					}
+
+					// Generate random amount between minSolAmount and maxSolAmount
+					randomAmount := minSolAmount + rand.Float64()*(maxSolAmount-minSolAmount)
+					solAmount := uint64(randomAmount * 1_000_000_000) // convert to lamports
 
 					instruction := system.Transfer(system.TransferParam{
 						From:   accountFrom.PublicKey,
@@ -363,6 +357,7 @@ func main() {
 			fmt.Println("==================")
 
 			for stage := 1; stage <= 3; stage++ {
+				time.Sleep(5 * time.Second)
 				fmt.Printf("Claiming reward stage %d for wallet: %s\n", stage, accountFrom.PublicKey.ToBase58())
 				claimReward(headers[i], stage)
 				time.Sleep(3 * time.Second)

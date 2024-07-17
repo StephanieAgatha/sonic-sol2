@@ -2,14 +2,12 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"github.com/blocto/solana-go-sdk/client"
-	"github.com/blocto/solana-go-sdk/common"
-	"github.com/blocto/solana-go-sdk/program/system"
-	"github.com/blocto/solana-go-sdk/rpc"
-	"github.com/blocto/solana-go-sdk/types"
 	"io/ioutil"
 	"math/rand"
 	"net/http"
@@ -19,6 +17,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blocto/solana-go-sdk/client"
+	"github.com/blocto/solana-go-sdk/common"
+	"github.com/blocto/solana-go-sdk/program/system"
+	"github.com/blocto/solana-go-sdk/rpc"
+	"github.com/blocto/solana-go-sdk/types"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -26,8 +29,29 @@ import (
 const (
 	delayRetry   = 2 * time.Second
 	minSolAmount = 0.001
-	maxSolAmount = 0.01 // You can adjust this value as needed
+	maxSolAmount = 0.01
+	challengeURL = "https://odyssey-api-beta.sonic.game/auth/sonic/challenge"
+	authorizeURL = "https://odyssey-api-beta.sonic.game/auth/sonic/authorize"
 )
+
+var headers = map[string]string{
+	"Accept":             "*/*",
+	"Accept-Encoding":    "gzip, deflate, br, zstd",
+	"Accept-Language":    "en-US,en;q=0.9",
+	"Cache-Control":      "no-cache",
+	"Origin":             "https://odyssey.sonic.game",
+	"Pragma":             "no-cache",
+	"Priority":           "u=1, i",
+	"Referer":            "https://odyssey.sonic.game/",
+	"Sec-Ch-Ua":          `"Not/A)Brand";v="8", "Chromium";v="126", "Microsoft Edge";v="126"`,
+	"Sec-Ch-Ua-Mobile":   "?0",
+	"Sec-Ch-Ua-Platform": `"macOS"`,
+	"Sec-Fetch-Dest":     "empty",
+	"Sec-Fetch-Mode":     "cors",
+	"Sec-Fetch-Site":     "same-site",
+	"Sec-Gpc":            "1",
+	"User-Agent":         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36",
+}
 
 func initLogger() {
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
@@ -60,33 +84,84 @@ func readPrivateKeys(filename string) ([]string, error) {
 	return privateKeys, nil
 }
 
-func readHeaders(filename string) ([]string, error) {
-	file, err := os.Open(filename)
+func getToken(privateKey string) (string, error) {
+	account, err := types.AccountFromBase58(privateKey)
 	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var headers []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		header := strings.TrimSpace(scanner.Text())
-		if header != "" {
-			headers = append(headers, header)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
+		return "", fmt.Errorf("failed to get account from private key: %w", err)
 	}
 
-	if len(headers) == 0 {
-		return nil, fmt.Errorf("No headers found in header.txt file")
+	challengeReq, err := http.NewRequest("GET", challengeURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create challenge request: %w", err)
+	}
+	q := challengeReq.URL.Query()
+	q.Add("wallet", account.PublicKey.ToBase58())
+	challengeReq.URL.RawQuery = q.Encode()
+
+	for key, value := range headers {
+		challengeReq.Header.Set(key, value)
 	}
 
-	return headers, nil
+	client := &http.Client{}
+	challengeResp, err := client.Do(challengeReq)
+	if err != nil {
+		return "", fmt.Errorf("failed to get challenge: %w", err)
+	}
+	defer challengeResp.Body.Close()
+
+	var challengeData struct {
+		Data string `json:"data"`
+	}
+	if err := json.NewDecoder(challengeResp.Body).Decode(&challengeData); err != nil {
+		return "", fmt.Errorf("failed to decode challenge response: %w", err)
+	}
+
+	signature := ed25519.Sign(account.PrivateKey, []byte(challengeData.Data))
+	signatureBase64 := base64.StdEncoding.EncodeToString(signature)
+
+	publicKeyBytes := account.PublicKey.Bytes()
+	publicKeyBase64 := base64.StdEncoding.EncodeToString(publicKeyBytes)
+
+	authPayload := map[string]string{
+		"address":         account.PublicKey.ToBase58(),
+		"address_encoded": publicKeyBase64,
+		"signature":       signatureBase64,
+	}
+
+	authPayloadJSON, err := json.Marshal(authPayload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal auth payload: %w", err)
+	}
+
+	authReq, err := http.NewRequest("POST", authorizeURL, bytes.NewBuffer(authPayloadJSON))
+	if err != nil {
+		return "", fmt.Errorf("failed to create auth request: %w", err)
+	}
+
+	for key, value := range headers {
+		authReq.Header.Set(key, value)
+	}
+	authReq.Header.Set("Content-Type", "application/json")
+
+	authResp, err := client.Do(authReq)
+	if err != nil {
+		return "", fmt.Errorf("failed to send auth request: %w", err)
+	}
+	defer authResp.Body.Close()
+
+	var authData struct {
+		Data struct {
+			Token string `json:"token"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(authResp.Body).Decode(&authData); err != nil {
+		return "", fmt.Errorf("failed to decode auth response: %w", err)
+	}
+
+	return authData.Data.Token, nil
 }
 
-func getTxMilestone(authKey string) {
+func getTxMilestone(authToken string) {
 	url := "https://odyssey-api-beta.sonic.game/user/transactions/state/daily"
 	method := "GET"
 
@@ -96,7 +171,7 @@ func getTxMilestone(authKey string) {
 		fmt.Println(err)
 		return
 	}
-	req.Header.Add("Authorization", authKey)
+	req.Header.Add("Authorization", authToken)
 	req.Header.Add("User-Agent", "Mozilla/5.0 Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Safari/605.1.15")
 
 	res, err := client.Do(req)
@@ -129,7 +204,7 @@ func getTxMilestone(authKey string) {
 	}
 }
 
-func claimReward(authKey string, stage int) {
+func claimReward(authToken string, stage int) {
 	url := "https://odyssey-api-beta.sonic.game/user/transactions/rewards/claim"
 	method := "POST"
 
@@ -141,12 +216,12 @@ func claimReward(authKey string, stage int) {
 	}
 
 	client := &http.Client{}
-	req, err := http.NewRequest(method, url, strings.NewReader(string(payloadBytes)))
+	req, err := http.NewRequest(method, url, bytes.NewBuffer(payloadBytes))
 	if err != nil {
 		fmt.Println("Failed to create request:", err)
 		return
 	}
-	req.Header.Add("Authorization", authKey)
+	req.Header.Add("Authorization", authToken)
 	req.Header.Add("Content-Type", "application/json")
 	req.Header.Add("Accept", "application/json")
 	req.Header.Add("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/97.0.4692.71 Safari/537.36")
@@ -164,10 +239,8 @@ func claimReward(authKey string, stage int) {
 		return
 	}
 
-	// i will print raw response for debugging first
 	fmt.Println("Raw response:", string(body))
 
-	// Check status code
 	if res.StatusCode != http.StatusOK {
 		fmt.Printf("Unexpected status code: %d\n", res.StatusCode)
 		return
@@ -193,7 +266,7 @@ func claimReward(authKey string, stage int) {
 
 func main() {
 	initLogger()
-	rand.Seed(time.Now().UnixNano()) // Initialize random number generator
+	rand.Seed(time.Now().UnixNano())
 
 	privateKeys, err := readPrivateKeys("pk.txt")
 	if err != nil {
@@ -201,27 +274,12 @@ func main() {
 		return
 	}
 
-	var headers []string
-	useHeaders := false
-
 	fmt.Print("Do you want to use Authorization key for claiming rewards? (y/n): ")
 	reader := bufio.NewReader(os.Stdin)
 	useAuthInput, _ := reader.ReadString('\n')
 	useAuthInput = strings.TrimSpace(strings.ToLower(useAuthInput))
 
-	if useAuthInput == "y" {
-		headers, err = readHeaders("header.txt")
-		if err != nil {
-			log.Error().Err(err).Msg("Failed to read header file")
-			return
-		}
-
-		if len(privateKeys) != len(headers) {
-			log.Error().Msg("Number of private keys and headers don't match")
-			return
-		}
-		useHeaders = true
-	}
+	useAuth := useAuthInput == "y"
 
 	rpcSonic := "https://devnet.sonic.game"
 	rpcClient := client.NewClient(rpcSonic)
@@ -247,7 +305,7 @@ func main() {
 	var wg sync.WaitGroup
 	startTime := time.Now()
 
-	for i, privateKeyBase58 := range privateKeys {
+	for _, privateKeyBase58 := range privateKeys {
 		accountFrom, err := types.AccountFromBase58(privateKeyBase58)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to generate keypair")
@@ -257,10 +315,6 @@ func main() {
 		if privateKeyBase58 == "" {
 			log.Error().Msg("No private keys found")
 			continue
-		}
-
-		if useHeaders {
-			fmt.Printf("Using header for wallet: %s\n", accountFrom.PublicKey.ToBase58())
 		}
 
 		balanceResult, err := rpcClient.GetBalance(context.TODO(), accountFrom.PublicKey.ToBase58())
@@ -303,9 +357,8 @@ func main() {
 						time.Sleep(delayRetry)
 					}
 
-					// Generate random amount between minSolAmount and maxSolAmount
 					randomAmount := minSolAmount + rand.Float64()*(maxSolAmount-minSolAmount)
-					solAmount := uint64(randomAmount * 1_000_000_000) // convert to lamports
+					solAmount := uint64(randomAmount * 1_000_000_000)
 
 					instruction := system.Transfer(system.TransferParam{
 						From:   accountFrom.PublicKey,
@@ -349,24 +402,31 @@ func main() {
 			}(address)
 		}
 
-		if useHeaders {
-			// After transactions for this wallet, claim rewards
+		wg.Wait()
+
+		if useAuth {
+			authToken, err := getToken(privateKeyBase58)
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to get authorization token")
+				continue
+			}
+
 			fmt.Println("==================")
 			fmt.Printf("Fetching transactions for wallet: %s\n", accountFrom.PublicKey.ToBase58())
-			getTxMilestone(headers[i])
+			getTxMilestone(authToken)
 			fmt.Println("==================")
 
+			fmt.Println("Sleeping 10 second for claiming...")
+			time.Sleep(10 * time.Second)
+
 			for stage := 1; stage <= 3; stage++ {
-				time.Sleep(5 * time.Second)
 				fmt.Printf("Claiming reward stage %d for wallet: %s\n", stage, accountFrom.PublicKey.ToBase58())
-				claimReward(headers[i], stage)
+				claimReward(authToken, stage)
 				time.Sleep(3 * time.Second)
 				fmt.Println("Done")
 			}
 		}
 	}
-
-	wg.Wait()
 
 	endTime := time.Now()
 	duration := endTime.Sub(startTime)
